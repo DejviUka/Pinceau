@@ -1,0 +1,8 @@
+# Core transcription library
+whisperx==3.3.2
+
+# PyTorch for model inference (CPU/GPU)
+torch>=2.0.0
+
+# Progress bars
+tqdm>=4.66.5
