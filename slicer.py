@@ -9,71 +9,113 @@ import sys
 import tempfile
 import shutil
 
+from config_transcribe import SILENCE_BETWEEN_CLIPS_S
+
+def cut_segment(src, start_s, end_s, dst):
+    """
+    Frame‐accurate copy‐codec cut from src at [start_s, end_s] → dst.
+    """
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", src,
+        "-ss", f"{start_s:.3f}",
+        "-to", f"{end_s:.3f}",
+        "-c", "copy",
+        dst
+    ]
+    subprocess.run(cmd, check=True)
+
 def main():
-    parser = argparse.ArgumentParser(
-        description="Cut and stitch the precise speech spans from your findref JSON."
+    p = argparse.ArgumentParser(
+        description="Cut & stitch speech spans with stable silence between them."
     )
-    parser.add_argument(
+    p.add_argument(
         "-i", "--input", required=True,
         help="Base name → reads processing/<input>/<input>.json"
     )
-    parser.add_argument(
+    p.add_argument(
         "-o", "--output", required=True,
         help="Base name → writes processed/<output>/<input>.mp4"
     )
-    args = parser.parse_args()
+    args = p.parse_args()
 
     in_base  = args.input
     out_base = args.output
 
-    json_path = os.path.join("processing", in_base, f"{in_base}.json")
-    if not os.path.isfile(json_path):
-        sys.exit(f"Error: JSON not found: {json_path}")
-
-    segments = json.load(open(json_path, encoding="utf-8"))
-    if not segments:
+    # 1) Load findref JSON
+    js = os.path.join("processing", in_base, f"{in_base}.json")
+    if not os.path.isfile(js):
+        sys.exit(f"Error: JSON not found: {js}")
+    entries = json.load(open(js, encoding="utf-8"))
+    if not entries:
         sys.exit("ℹ No segments to cut; exiting.")
 
+    # 2) Sort by original start
+    entries.sort(key=lambda e: (e["folder"], e["start"]))
+
+    # 3) Prepare output dirs
     out_dir = os.path.join("processed", out_base)
     os.makedirs(out_dir, exist_ok=True)
     final_vid = os.path.join(out_dir, f"{in_base}.mp4")
 
     tmp = tempfile.mkdtemp(prefix="slicer_")
-    cuts = []
+    clips = []
+    half_pad = SILENCE_BETWEEN_CLIPS_S / 2.0
 
-    for idx, seg in enumerate(segments):
-        fld = seg["folder"]
-        name = fld[:-6] if fld.endswith("_files") else fld
-        src  = os.path.join(fld, f"{name}.mp4")
+    # 4) Build padded clip list
+    for idx, ent in enumerate(entries):
+        folder = ent["folder"]
+        name   = folder[:-6] if folder.endswith("_files") else folder
+        src    = os.path.join(folder, f"{name}.mp4")
         if not os.path.isfile(src):
-            print(f"⚠ Skipping missing video: {src}", file=sys.stderr)
+            print(f"⚠ Missing video {src}, skipping", file=sys.stderr)
             continue
 
-        cut_path = os.path.join(tmp, f"{idx:03d}.mp4")
-        cmd = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-i", src,
-            "-ss", f"{seg['start']:.3f}",
-            "-to", f"{seg['end']:.3f}",
-            "-c", "copy",
-            cut_path
-        ]
-        print(f"[{idx}] Cutting {seg['start']:.3f}s–{seg['end']:.3f}s from {src}")
-        subprocess.run(cmd, check=True)
-        cuts.append(cut_path)
+        st, en = ent["start"], ent["end"]
 
-    if not cuts:
-        sys.exit("ℹ No cuts made; exiting.")
+        # compute pad_before
+        if idx > 0 and entries[idx-1]["folder"] == ent["folder"]:
+            prev_end = entries[idx-1]["end"]
+            gap = st - prev_end
+            pad_before = min(half_pad, gap/2.0)
+        else:
+            pad_before = half_pad
 
-    list_file = os.path.join(tmp, "list.txt")
-    with open(list_file, "w") as lf:
-        for c in cuts:
-            lf.write(f"file '{c}'\n")
+        # compute pad_after
+        if idx < len(entries)-1 and entries[idx+1]["folder"] == ent["folder"]:
+            next_start = entries[idx+1]["start"]
+            gap2 = next_start - en
+            pad_after = min(half_pad, gap2/2.0)
+        else:
+            pad_after = half_pad
+
+        cs = max(0.0, st - pad_before)
+        ce = en + pad_after
+
+        clips.append({"src": src, "start": cs, "end": ce})
+        print(f"[{idx:02d}] clip: {cs:.3f}s → {ce:.3f}s from {src}")
+
+    if not clips:
+        shutil.rmtree(tmp)
+        sys.exit("ℹ No clips to cut; exiting.")
+
+    # 5) Cut each padded segment
+    cut_paths = []
+    for i, c in enumerate(clips):
+        outp = os.path.join(tmp, f"{i:03d}.mp4")
+        cut_segment(c["src"], c["start"], c["end"], outp)
+        cut_paths.append(outp)
+
+    # 6) Write ffmpeg concat list & stitch
+    list_txt = os.path.join(tmp, "list.txt")
+    with open(list_txt, "w") as f:
+        for pth in cut_paths:
+            f.write(f"file '{pth}'\n")
 
     subprocess.run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-f", "concat", "-safe", "0",
-        "-i", list_file,
+        "-i", list_txt,
         "-c", "copy",
         final_vid
     ], check=True)

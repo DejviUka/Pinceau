@@ -14,3 +14,7 @@ language = "en"
 
 # Alignment model name, set to None to use default. For English, "WAV2VEC2_ASR_LARGE_960H" can be used for potentially better alignment.
 alignment_model = "WAV2VEC2_ASR_LARGE_960H"
+
+# For slicer.py only: desired non‐speech interval between clips (seconds)
+# slicer will add half of this before and after each kept sentence
+SILENCE_BETWEEN_CLIPS_S = 0.7
